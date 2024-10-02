@@ -1,0 +1,102 @@
+import skimage.io 
+import skimage.segmentation
+import keras
+import numpy as np
+from keras.applications.imagenet_utils import decode_predictions
+import copy
+from tensorflow.keras.applications.inception_v3 import InceptionV3
+import lime
+from lime import lime_image
+import cv2
+import matplotlib.pyplot as plt
+
+# Read and preprocess the image
+Xi = skimage.io.imread("Image\cat_imagenet.jpg")
+Xi = skimage.transform.resize(Xi, (299, 299)) 
+Xi = (Xi - 0.5) * 2 
+
+# Load the model
+inceptionV3_model = InceptionV3(weights="imagenet")
+
+# Predict the class
+preds = inceptionV3_model.predict(Xi[np.newaxis, :, :, :]) 
+top_pred_classes = preds[0].argsort()[-5:][::-1]
+
+# Generate superpixels
+superpixels = skimage.segmentation.quickshift(Xi, kernel_size=4, max_dist=200, ratio=0.2) 
+num_superpixels = np.unique(superpixels).shape[0]
+
+# Use LIME to explain the prediction
+explainer = lime_image.LimeImageExplainer()
+explanation = explainer.explain_instance(Xi, inceptionV3_model.predict, top_labels=5, hide_color=0, num_samples=1000)
+
+# Get the original classification score
+R_O = preds[0]
+
+# Function to calculate EE score
+def calculate_ee_score(original_scores, perturbed_scores):
+    return 1 - np.sum(original_scores * np.abs(original_scores - perturbed_scores))
+
+# Function to calculate EE score for top N superpixels using LIME
+def calculate_ee_score_for_top_n(n, explanation, Xi, superpixels, inceptionV3_model, R_O):
+    temp, mask = explanation.get_image_and_mask(top_pred_classes[0], positive_only=True, num_features=n, hide_rest=True)
+    mask_image = Xi * mask[:, :, np.newaxis]
+    preds_masked = inceptionV3_model.predict(mask_image[np.newaxis, :, :, :])
+    R_P = preds_masked[0]
+    ee_score = calculate_ee_score(R_O, R_P)
+    return ee_score
+
+# Calculate EE scores for different numbers of top superpixels
+ee_scores = []
+num_top_superpixels = []
+
+for n in range(1, num_superpixels + 1):
+    ee_score = calculate_ee_score_for_top_n(n, explanation, Xi, superpixels, inceptionV3_model, R_O)
+    ee_scores.append(ee_score)
+    num_top_superpixels.append(n)
+
+
+
+# Plot EE score vs number of top superpixels
+plt.figure(figsize=(10, 6))
+plt.plot(num_top_superpixels, ee_scores,marker='o')
+plt.xlabel('Number of Top Superpixels')
+plt.ylabel('EE Score')
+plt.title('EE Score vs Number of Top Superpixels Using LIME library')
+plt.show()
+for i in range(len(ee_scores)):
+    if ee_scores[i]>=0.9:
+        num_of_segment=i
+        break
+
+temp, mask = explanation.get_image_and_mask(
+    explanation.top_labels[0], 
+    positive_only=True, 
+    num_features=5, 
+    hide_rest=True)
+# Mark the boundaries with default behavior (gray)
+marked_image = skimage.segmentation.mark_boundaries(temp / 2 + 0.5, mask)
+
+# Iterate over the image and change gray pixels to black
+for i in range(marked_image.shape[0]):
+    for j in range(marked_image.shape[1]):
+        if np.allclose(marked_image[i, j], [0.5, 0.5, 0.5]) or np.allclose(marked_image[i, j], [1, 1, 0]):
+            marked_image[i, j] = [0, 0, 0]  # Set gray and yellow pixels to black
+plt.imshow(marked_image)
+plt.title(f"No of superpixels are {5}")
+plt.axis('off')
+plt.show()
+from skimage import img_as_ubyte
+perturbed_image=marked_image
+perturbed_image_uint8 = img_as_ubyte(perturbed_image)
+skimage.io.imsave('perturbed_image.png', perturbed_image_uint8)
+print("Image to be read")
+Xi = skimage.io.imread("perturbed_image.png")
+Xi = skimage.transform.resize(Xi, (299,299)) 
+skimage.io.imshow(Xi)
+Xi = (Xi - 0.5)*2 
+print("The top 5 classes of predictions are - ")
+preds = inceptionV3_model.predict(Xi[np.newaxis,:,:,:]) 
+print(decode_predictions(preds)) #top = 5 default
+R_O=preds[0]
+print(R_O)
